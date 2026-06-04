@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>拉完了嗎</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
+    <style>
+        .tier-row { min-height: 80px; }
+        .draggable-item { cursor: grab; }
+        .draggable-item:active { cursor: grabbing; }
+        /* 限制裁剪區域的最大高度，避免大圖撐破螢幕 */
+        .img-container {
+            max-height: 400px;
+            width: 100%;
+        }
+        .img-container img {
+            max-width: 100%;
+            display: block;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen p-8">
+
+    <div id="app" class="max-w-5xl mx-auto">
+        <h1 class="text-3xl font-bold mb-6 text-center text-indigo-400">我瞧瞧你拉不拉</h1>
+
+        <div class="border border-gray-700 rounded-lg overflow-hidden shadow-2xl mb-8">
+            <div v-for="(tier, index) in tiers" :key="tier.name" class="flex border-b border-gray-700 last:border-b-0">
+                <div :class="[tier.color, 'w-24 flex items-center justify-center text-xl font-bold text-gray-900 select-none text-center p-2']">
+                    {{ tier.name }}
+                </div>
+                <div 
+                    class="tier-row flex-1 bg-gray-800 p-2 flex flex-wrap gap-2 items-center"
+                    @dragover.prevent
+                    @drop="handleDrop($event, tier.name)"
+                >
+                    <div 
+                        v-for="item in getTierItems(tier.name)" 
+                        :key="item.id"
+                        class="draggable-item w-16 h-16 bg-cover bg-center rounded border border-gray-600 shadow"
+                        :style="{ backgroundImage: 'url(' + item.src + ')' }"
+                        draggable="true"
+                        @dragstart="handleDragStart($event, item.id)"
+                    ></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="bg-gray-800 p-6 rounded-lg border border-gray-700 mb-8">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-semibold text-gray-300">待分配圖片庫</h3>
+                
+                <label class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded cursor-pointer transition">
+                    上傳並裁剪圖片
+                    <input type="file" accept="image/*" class="hidden" @change="onFileChange">
+                </label>
+            </div>
+
+            <div 
+                class="tier-row bg-gray-900 p-4 rounded border-2 border-dashed border-gray-700 flex flex-wrap gap-3 min-h-[100px]"
+                @dragover.prevent
+                @drop="handleDrop($event, 'pool')"
+            >
+                <div 
+                    v-for="item in getTierItems('pool')" 
+                    :key="item.id"
+                    class="draggable-item w-16 h-16 bg-cover bg-center rounded border border-gray-600 shadow relative group"
+                    :style="{ backgroundImage: 'url(' + item.src + ')' }"
+                    draggable="true"
+                    @dragstart="handleDragStart($event, item.id)"
+                >
+                    <button @click="removeItem(item.id)" class="absolute -top-2 -right-2 bg-red-600 text-xs w-5 h-5 rounded-full hidden group-hover:flex items-center justify-center text-white font-bold">×</button>
+                </div>
+                <p v-if="getTierItems('pool').length === 0" class="text-gray-500 text-sm m-auto">請上傳圖片，並將它們拖曳到上方的 Tier 中</p>
+            </div>
+        </div>
+
+        <div v-if="isCropping" class="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+            <div class="bg-gray-800 p-6 rounded-lg max-w-xl w-full border border-gray-700">
+                <h3 class="text-lg font-bold mb-2">調整圖片</h3>
+                <p class="text-xs text-gray-400 mb-4">可用滑鼠拖動裁剪框、移動圖片，或使用滑鼠滾輪進行縮放。</p>
+                
+                <div class="img-container bg-gray-950 rounded overflow-hidden flex justify-center items-center">
+                    <img id="imageToCrop" :src="imageSrcForCropper">
+                </div>
+
+                <div class="flex justify-end gap-3 mt-6">
+                    <button @click="cancelCropping" class="bg-gray-600 hover:bg-gray-500 px-4 py-2 rounded">取消</button>
+                    <button @click="cropAndSave" class="bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded font-bold">確認裁剪</button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        const { createApp, ref, nextTick } = Vue;
+
+        createApp({
+            setup() {
+                const TiersDef = [
+                    { name: '夯', color: 'bg-red-500' },
+                    { name: '頂級', color: 'bg-orange-500' },
+                    { name: '人上人', color: 'bg-yellow-500' },
+                    { name: 'NPC', color: 'bg-green-500' },
+                    { name: '拉完了', color: 'bg-blue-500' },
+                ];
+                const Tiers = ref(TiersDef);
+                const items = ref([]);
+                
+                // Cropper 相關變數
+                const isCropping = ref(false);
+                const imageSrcForCropper = ref('');
+                let cropperInstance = null;
+                let dragItemId = null;
+
+                const getTierItems = (tierName) => {
+                    return items.value.filter(item => item.tier === tierName);
+                };
+
+                // 當選取檔案
+                const onFileChange = (e) => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                        imageSrcForCropper.value = event.target.result;
+                        isCropping.value = true;
+
+                        // 等待 Vue 將 <img> 渲染到 DOM 中後，再初始化 Cropper
+                        nextTick(() => {
+                            initCropper();
+                        });
+                    };
+                    reader.readAsDataURL(file);
+                    e.target.value = ''; // 重置
+                };
+
+                // 初始化 Cropper.js
+                const initCropper = () => {
+                    const image = document.getElementById('imageToCrop');
+                    if (!image) return;
+
+                    // 銷毀舊的實例防止記憶體洩漏
+                    if (cropperInstance) {
+                        cropperInstance.destroy();
+                    }
+
+                    cropperInstance = new Cropper(image, {
+                        aspectRatio: 1, // 1:1 正方形
+                        viewMode: 1,    // 限制裁剪框不能超出圖片範圍
+                        dragMode: 'move', // 預設模式：可以拖動圖片本身
+                        autoCropArea: 0.8, // 預設裁剪框大小佔 80%
+                        background: false,
+                        responsive: true,
+                        restore: false
+                    });
+                };
+
+                // 完成裁剪並儲存
+                const cropAndSave = () => {
+                    if (!cropperInstance) return;
+
+                    // 取得裁剪後的 Canvas (指定輸出為 150x150 高畫質縮圖)
+                    const canvas = cropperInstance.getCroppedCanvas({
+                        width: 150,
+                        height: 150,
+                        imageSmoothingEnabled: true,
+                        imageSmoothingQuality: 'high',
+                    });
+
+                    const croppedSrc = canvas.toDataURL('image/jpeg');
+
+                    items.value.push({
+                        id: 'img_' + Date.now() + Math.random().toString(36).substr(2, 5),
+                        src: croppedSrc,
+                        tier: 'pool'
+                    });
+
+                    // 關閉並銷毀
+                    cancelCropping();
+                };
+
+                const cancelCropping = () => {
+                    isCropping.value = false;
+                    if (cropperInstance) {
+                        cropperInstance.destroy();
+                        cropperInstance = null;
+                    }
+                };
+
+                // --- 拖曳事件處理 ---
+                const handleDragStart = (e, id) => {
+                    dragItemId = id;
+                    e.dataTransfer.effectAllowed = 'move';
+                };
+
+                const handleDrop = (e, targetTier) => {
+                    const item = items.value.find(i => i.id === dragItemId);
+                    if (item) {
+                        item.tier = targetTier;
+                    }
+                    dragItemId = null;
+                };
+
+                const removeItem = (id) => {
+                    items.value = items.value.filter(i => i.id !== id);
+                };
+
+                return {
+                    tiers: Tiers,
+                    items,
+                    isCropping,
+                    imageSrcForCropper,
+                    getTierItems,
+                    onFileChange,
+                    cropAndSave,
+                    cancelCropping,
+                    handleDragStart,
+                    handleDrop,
+                    removeItem
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
